@@ -275,6 +275,8 @@ export interface TranscriptEntry {
   id: string;
   kind: string;
   seq?: number;
+  /** max(seq, updatedSeq): bumps when the entry is edited in place (e.g. a streamed reply finishing). */
+  revision?: number;
   role?: string;
   timestampMs?: number;
   author?: { id?: string; name?: string };
@@ -299,10 +301,12 @@ function toEntry(raw: unknown): TranscriptEntry | null {
   const r = raw as Record<string, unknown>;
   const seq = Number(r.seq ?? 0);
   if (!Number.isSafeInteger(seq) || seq < 0) return null;
+  const updated = r.updatedSeq === undefined || r.updatedSeq === null ? seq : Number(r.updatedSeq);
+  const revision = Number.isSafeInteger(updated) && updated > seq ? updated : seq;
   const body = decodeBody(r.body) ?? {};
   const entryId = str(r.entryId, 200) ?? str(body.id, 200);
   const kind = str(body.kind, 100) ?? str(r.entryKind, 100) ?? str(body.type, 100) ?? "unknown";
-  return { ...body, id: entryId ?? `seq:${seq}`, kind, seq };
+  return { ...body, id: entryId ?? `seq:${seq}`, kind, seq, revision };
 }
 
 export async function readThread(
@@ -319,10 +323,13 @@ export async function readThread(
     .filter((e): e is TranscriptEntry => e !== null)
     .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
   const afterSeq = after !== null && /^\d+$/.test(after) ? Number(after) : null;
-  const fresh = afterSeq === null ? entries : entries.filter((e) => (e.seq ?? 0) > afterSeq);
+  // The cursor is the highest revision seen, so an entry edited in place after it was
+  // mirrored (its updatedSeq moves past the cursor) comes back and is refreshed.
+  const rev = (e: TranscriptEntry) => e.revision ?? e.seq ?? 0;
+  const fresh = afterSeq === null ? entries : entries.filter((e) => rev(e) > afterSeq);
   const oldest = entries[0]?.seq ?? null;
   const gapReset = afterSeq !== null && oldest !== null && oldest > afterSeq + 1 && entries.length >= THREAD_LIMIT;
-  const newest = entries.at(-1)?.seq;
+  const newest = entries.length ? Math.max(...entries.map(rev)) : undefined;
   return { entries: fresh, cursor: newest === undefined ? after : String(newest), gapReset };
 }
 

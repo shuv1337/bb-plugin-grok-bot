@@ -87,6 +87,7 @@ export function installFakeBackend(stateFile: string): void {
       return json({
         entries: state.entries.map((e) => ({
           seq: String(e.seq ?? 0),
+          ...(e.updatedSeq !== undefined ? { updatedSeq: String(e.updatedSeq) } : {}),
           entryId: e.id,
           body: Buffer.from(JSON.stringify(e)).toString("base64"),
         })),

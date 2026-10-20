@@ -203,6 +203,40 @@ it("mirrors Grok app activity into a bridge-opened turn", async () => {
   send("thread/stop", { threadId: "thr_m", providerThreadId: "ignored", activeTurnId: null, intent: "release" });
 }, 20_000);
 
+it("refreshes an entry edited in place (updatedSeq) under the same bb item", async () => {
+  send("thread/start", { threadId: "thr_u", cwd: workDir, instructionMode: "append", options: options(FAKE_BOT) });
+  send("turn/start", {
+    threadId: "thr_u",
+    providerThreadId: "ignored",
+    clientRequestId: "creq_uuuuuuuuuu",
+    input: [{ type: "text", text: "[grok-bot:register] Fakey", mentions: [] }],
+    options: options(FAKE_BOT),
+  });
+  await waitForBoundary("thr_u", 1);
+  let state = JSON.parse(readFileSync(process.env.FAKE_GBOT_STATE!, "utf8"));
+  state.entries.push(
+    { id: "u1", seq: 2, kind: "send-message", timestampMs: Date.now(), message: { type: "text", content: "partial" } },
+  );
+  writeFileSync(process.env.FAKE_GBOT_STATE!, JSON.stringify(state));
+  await waitForBoundary("thr_u", 2);
+  state = JSON.parse(readFileSync(process.env.FAKE_GBOT_STATE!, "utf8"));
+  const edited = state.entries.find((e: { id: string }) => e.id === "u1");
+  edited.message.content = "final";
+  edited.updatedSeq = 4;
+  const user = state.entries.find((e: { kind: string; role?: string }) => e.kind === "message" && e.role === "user");
+  if (user) user.updatedSeq = 5;
+  else state.entries.push({ id: "u0", seq: 1, updatedSeq: 5, kind: "message", role: "user", timestampMs: 1, content: "old user" });
+  state.entries.push({ id: "u2", seq: 3, kind: "send-message", timestampMs: Date.now(), message: { type: "text", content: "next" } });
+  writeFileSync(process.env.FAKE_GBOT_STATE!, JSON.stringify(state));
+  const deltas = await waitForBoundary("thr_u", 3);
+  const lastTurn = deltas.slice(deltas.map((d) => d.kind).lastIndexOf("turn.boundary", deltas.length - 2) + 1);
+  expect(messages(lastTurn)).toEqual([`${FAKEY_TAG}final`, `${FAKEY_TAG}next`]);
+  const keys = lastTurn.filter((d) => d.kind === "item.open").map((d) => (d as { key: { providerItemId: string } }).key.providerItemId);
+  expect(keys).toEqual(["grok-bot-u1", "grok-bot-u2"]);
+  expect(lastTurn.some((d) => d.kind === "input.provider")).toBe(false);
+  send("thread/stop", { threadId: "thr_u", providerThreadId: "ignored", activeTurnId: null, intent: "release" });
+}, 30_000);
+
 it("does not forward bb system notices to the bot", async () => {
   send("thread/start", { threadId: "thr_s", cwd: workDir, instructionMode: "append", options: options(FAKE_BOT) });
   send("turn/start", {

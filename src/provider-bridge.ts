@@ -270,6 +270,7 @@ interface MirrorContext {
 const entryExtrasSchema = z
   .object({
     seq: z.number().optional(),
+    revision: z.number().optional(),
     content: z.string().optional(),
     toAgent: z.object({ id: z.string(), name: z.string() }).passthrough().optional(),
     fromAgent: z.object({ id: z.string(), name: z.string() }).passthrough().optional(),
@@ -288,7 +289,7 @@ const sendMessageSchema = z
 
 function entrySeq(entry: TranscriptEntry): number | null {
   const parsed = entryExtrasSchema.safeParse(entry);
-  return parsed.success ? (parsed.data.seq ?? null) : null;
+  return parsed.success ? (parsed.data.revision ?? parsed.data.seq ?? null) : null;
 }
 
 function botItem(key: string, author: { id: string; name: string }, body: string): ThreadDelta[] {
@@ -427,9 +428,12 @@ async function pullTranscript(args: {
   const deltas: ThreadDelta[] = [];
   for (let page = 0; page < MAX_PAGES_PER_PULL; page += 1) {
     const result = await readThread(api, agentId, backfill ? null : state.cursor, args.signal);
+    // Entries come in seq order but are compared by revision (an edited entry's
+    // updatedSeq), so the floor must be fixed for the page, not raised mid-page.
+    const floor = state.lastSeq;
     for (const entry of result.entries) {
       const seq = entrySeq(entry);
-      if (seq !== null && state.lastSeq !== null && seq <= state.lastSeq) continue;
+      if (seq !== null && floor !== null && seq <= floor) continue;
       if (
         seq === null &&
         result.gapReset &&
@@ -437,7 +441,12 @@ async function pullTranscript(args: {
       ) {
         continue;
       }
-      deltas.push(...entryDeltas(entry, context));
+      const out = entryDeltas(entry, context);
+      // An entry already mirrored and now only edited (a reaction or a finished stream
+      // bumps updatedSeq) may refresh its keyed bot item, but must never replay a
+      // user message as a second input row.
+      const revisit = floor !== null && entry.seq !== undefined && entry.seq <= floor;
+      deltas.push(...(revisit ? out.filter((d) => d.kind.startsWith("item.")) : out));
       if (seq !== null) state.lastSeq = Math.max(state.lastSeq ?? seq, seq);
     }
     if (result.cursor) state.cursor = result.cursor;
