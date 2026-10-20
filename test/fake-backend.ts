@@ -30,6 +30,8 @@ export function writeConfig(workDir: string, allowedBots: string[], extra: Recor
   delete process.env.GROK_BOT_ACCESS_TOKEN;
   delete process.env.GROK_BOT_ALLOWED_BOTS;
   delete process.env.GROK_BOT_API_BASE_URL;
+  delete process.env.GROK_BOT_TOKEN_SOURCE;
+  delete process.env.GROK_BOT_TEAM_ID;
   return dir;
 }
 

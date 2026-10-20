@@ -4,8 +4,8 @@ A BB agent provider for [Grok Bot](https://x.ai/bot). Each BB thread talks to
 one **allowlisted** Grok Bot bot or group, calling the Grok Bot backend directly
 over HTTPS (Connect-JSON, the same approach botdeck uses).
 
-This fork (`linux-auth`) removes the dependency on a patched `gbot`, the macOS
-Keychain and the desktop app's local storage. It works on Linux.
+This fork (`linux-auth`) removes the dependency on a patched `gbot` and the macOS
+Keychain. It works on Linux.
 
 ## Linux setup
 
@@ -21,9 +21,9 @@ bb plugin install . --yes
 
 ### Token
 
-The plugin never reads the Grok Bot desktop app's storage, a keyring or cookies,
-and it never logs the token or passes it to another process. You supply a Grok Bot
-account access token in one of two ways:
+The plugin never reads a keyring or cookies, and it never logs, persists or passes
+the token to another process. By default you supply a Grok Bot account access token
+in one of two ways (option 3 is opt-in):
 
 1. **File (preferred).** `$XDG_CONFIG_HOME/bb-grok-bot/token` (default
    `~/.config/bb-grok-bot/token`):
@@ -37,6 +37,16 @@ account access token in one of two ways:
    file is a symlink or not owned by you, or if the file is readable by anyone but you.
 2. **Environment.** `GROK_BOT_ACCESS_TOKEN`. Other processes running as you can read
    it, so prefer the file.
+3. **Desktop app (opt-in).** If the Grok Bot desktop app is signed in on this Linux
+   machine, set `"tokenSource": "desktop-app"` in `~/.config/bb-grok-bot/config.json`
+   (or `GROK_BOT_TOKEN_SOURCE=desktop-app`). The plugin then reads the active
+   account's access token from `~/.config/Grok Bot/sand-secrets.json` on each call,
+   in memory only, the way botdeck does (Electron safeStorage `v10` or
+   `plaintext:v1`; keyring-backed `v11` is not supported). The store must be a
+   regular file you own with mode 600. The plugin never writes the store, never
+   touches the refresh token and never saves the decrypted token. The desktop app
+   stays responsible for refreshing it: if it expires, open the app. The team id
+   comes from the desktop account unless `GROK_BOT_TEAM_ID` is set.
 
 Optional: `GROK_BOT_TEAM_ID` (team-scoped bots).
 

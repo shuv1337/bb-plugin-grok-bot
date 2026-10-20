@@ -2,17 +2,19 @@
 //
 // The token comes from GROK_BOT_ACCESS_TOKEN or from a private file
 // ($XDG_CONFIG_HOME/bb-grok-bot/token, mode 0600 in a 0700 directory you own).
-// It is never read from the Grok Bot desktop app's storage, the Keychain, or a
-// cookie jar, and it never appears in logs, errors or a child process's argv.
+// Opt-in: tokenSource "desktop-app" (config.json or GROK_BOT_TOKEN_SOURCE) reads the
+// signed-in Grok Bot desktop app's own token in memory (see desktop-token.ts).
+// Never the Keychain or a cookie jar; never in logs, errors or a child's argv.
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { DesktopTokenError, readDesktopToken } from "./desktop-token.js";
 
 export const DEFAULT_BASE_URL = "https://api2.cursor.sh";
 /** Hosts a token may be sent to. Exact match; no suffixes, no ports, https only. */
 export const ALLOWED_API_HOSTS: ReadonlySet<string> = new Set(["api2.cursor.sh"]);
 
-const TOKEN_PATTERN = /^[\x21-\x7e]{8,8192}$/;
+const TOKEN_PATTERN = /^[\x21-\x7e]{8,32768}$/;
 const TEAM_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_FILE_BYTES = 16 * 1024;
 
@@ -139,13 +141,38 @@ export function parseBaseUrl(value: string): string {
   return url.origin;
 }
 
+export type TokenSource = "token" | "desktop-app";
+
+/** GROK_BOT_TOKEN_SOURCE overrides config.json's tokenSource. Default "token" (env var / file). */
+export function tokenSource(env: Env = process.env): TokenSource {
+  let value: unknown = env.GROK_BOT_TOKEN_SOURCE?.trim();
+  if (!value) value = readConfigFile(env).tokenSource;
+  if (value === undefined || value === null || value === "" || value === "token") return "token";
+  if (value === "desktop-app") return "desktop-app";
+  throw new GrokAuthError('tokenSource must be "token" or "desktop-app"', "invalid");
+}
+
 export function loadCredentials(env: Env = process.env): Credentials {
   const baseUrl = parseBaseUrl(env.GROK_BOT_API_BASE_URL?.trim() || DEFAULT_BASE_URL);
   const teamRaw = env.GROK_BOT_TEAM_ID?.trim() || null;
   if (teamRaw !== null && !TEAM_ID_PATTERN.test(teamRaw)) {
     throw new GrokAuthError("GROK_BOT_TEAM_ID is malformed", "invalid");
   }
-  let token = env.GROK_BOT_ACCESS_TOKEN?.trim() || null;
+  const source = tokenSource(env);
+  let token: string | null = null;
+  let teamId = teamRaw;
+  if (source === "desktop-app") {
+    try {
+      const desktop = readDesktopToken(env);
+      token = desktop.accessToken;
+      teamId ??= desktop.teamId;
+    } catch (error) {
+      if (error instanceof DesktopTokenError) throw new GrokAuthError(error.message, "not-configured");
+      throw new GrokAuthError("Grok Bot desktop app token unavailable", "not-configured");
+    }
+  } else {
+    token = env.GROK_BOT_ACCESS_TOKEN?.trim() || null;
+  }
   if (token === null) {
     const dir = configDir(env);
     const path = tokenFilePath(env);
@@ -160,7 +187,7 @@ export function loadCredentials(env: Env = process.env): Credentials {
     token = raw.trim();
   }
   if (!TOKEN_PATTERN.test(token)) throw new GrokAuthError("Grok Bot token is malformed", "invalid");
-  const credentials = { baseUrl, teamId: teamRaw } as Credentials;
+  const credentials = { baseUrl, teamId } as Credentials;
   Object.defineProperty(credentials, "accessToken", { value: token, enumerable: false });
   return Object.freeze(credentials);
 }
@@ -181,11 +208,7 @@ function parseList(value: unknown): string[] {
   ];
 }
 
-/**
- * Bot allowlist and opt-ins. GROK_BOT_ALLOWED_BOTS (comma-separated) overrides the
- * config file's `allowedBots`. An empty list allows nothing.
- */
-export function loadPolicy(env: Env = process.env): AccessPolicy {
+function readConfigFile(env: Env): Record<string, unknown> {
   let file: Record<string, unknown> = {};
   const dir = configDir(env);
   let raw: string | null = null;
@@ -208,6 +231,15 @@ export function loadPolicy(env: Env = process.env): AccessPolicy {
       throw new GrokAuthError(`${configFilePath(env)} is not a JSON object`, "invalid");
     }
   }
+  return file;
+}
+
+/**
+ * Bot allowlist and opt-ins. GROK_BOT_ALLOWED_BOTS (comma-separated) overrides the
+ * config file's `allowedBots`. An empty list allows nothing.
+ */
+export function loadPolicy(env: Env = process.env): AccessPolicy {
+  const file = readConfigFile(env);
   const fromEnv = env.GROK_BOT_ALLOWED_BOTS;
   return Object.freeze({
     allowedBots: Object.freeze(parseList(fromEnv !== undefined ? fromEnv : file.allowedBots)),
