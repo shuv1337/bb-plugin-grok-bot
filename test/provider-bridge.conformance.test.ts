@@ -1,7 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import {
   experimental_captureBridgeJsonRpcOutput as captureBridgeJsonRpcOutput,
@@ -11,9 +10,9 @@ import {
 import type { CapturedBridgeJsonRpcOutput } from "@get-bb/plugin-sdk/provider-bridge/testing";
 
 import { handleLine } from "../src/provider-bridge.js";
+import { FAKE_BOT, FAKE_GROUP, installFakeBackend, writeConfig } from "./fake-backend.js";
+import { setFetchForTesting } from "../src/grok-api.js";
 
-const FAKE_GBOT = fileURLToPath(new URL("./fake-gbot.mjs", import.meta.url));
-const FAKE_BOT = "11111111-2222-4333-8444-555555555555";
 
 let output: CapturedBridgeJsonRpcOutput;
 let workDir: string;
@@ -21,11 +20,14 @@ let workDir: string;
 beforeEach(() => {
   workDir = mkdtempSync(join(tmpdir(), "bb-grok-bot-conformance-"));
   process.env.FAKE_GBOT_STATE = join(workDir, "state.json");
+  writeConfig(workDir, [FAKE_BOT, FAKE_GROUP]);
+  installFakeBackend(process.env.FAKE_GBOT_STATE);
   output = captureBridgeJsonRpcOutput();
 });
 
 afterEach(() => {
   output.restore();
+  setFetchForTesting(null);
   rmSync(workDir, { recursive: true, force: true });
 });
 
@@ -42,7 +44,7 @@ it("passes the canonical protocol suite", async () => {
         permissionScope: "full",
         approvalReviewer: null,
         permissionEscalation: null,
-        providerOptions: { gbotPath: FAKE_GBOT, pollIntervalMs: 1_000 },
+        providerOptions: { pollIntervalMs: 1_000 },
       },
     },
     timeoutMs: 20_000,

@@ -28,16 +28,15 @@ import { join } from "node:path";
 import { z } from "zod";
 import {
   type GrokAgent,
+  type GrokApi,
   type TranscriptEntry,
-  GbotError,
-  doctor,
-  gbotVersion,
+  GrokApiError,
   getAgent,
   listAgents,
   readThread,
-  resolveGbot,
+  resolveApi,
   sendMessage,
-} from "./gbot.js";
+} from "./grok-api.js";
 import {
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_START_GRACE_MS,
@@ -383,10 +382,10 @@ function resolveAgentId(
 
 const BOT_NAMES = new Map<string, string>();
 
-async function agentName(gbot: string, agentId: string, signal?: AbortSignal): Promise<string> {
+async function agentName(api: GrokApi, agentId: string, signal?: AbortSignal): Promise<string> {
   const known = BOT_NAMES.get(agentId);
   if (known) return known;
-  const agent = await getAgent(gbot, agentId, signal);
+  const agent = await getAgent(api, agentId, signal);
   BOT_NAMES.set(agentId, agent.name);
   return agent.name;
 }
@@ -407,13 +406,13 @@ function withMirrorLock<T>(session: Session, run: () => Promise<T>): Promise<T> 
 // Reads every Grok entry bb hasn't shown yet and returns the deltas that show them,
 // committing the cursor only through `commit` once the deltas are on the wire.
 async function pullTranscript(args: {
-  gbot: string;
+  api: GrokApi;
   session: Session;
   agentId: string;
   signal?: AbortSignal;
 }): Promise<{ deltas: ThreadDelta[]; commit: () => void }> {
-  const { gbot, session, agentId } = args;
-  const name = await agentName(gbot, agentId, args.signal);
+  const { api, session, agentId } = args;
+  const name = await agentName(api, agentId, args.signal);
   const previous = readMirror(session.providerThreadId);
   const state: MirrorState =
     previous && previous.agentId === agentId
@@ -427,7 +426,7 @@ async function pullTranscript(args: {
   };
   const deltas: ThreadDelta[] = [];
   for (let page = 0; page < MAX_PAGES_PER_PULL; page += 1) {
-    const result = await readThread(gbot, agentId, backfill ? null : state.cursor, args.signal);
+    const result = await readThread(api, agentId, backfill ? null : state.cursor, args.signal);
     for (const entry of result.entries) {
       const seq = entrySeq(entry);
       if (seq !== null && state.lastSeq !== null && seq <= state.lastSeq) continue;
@@ -472,10 +471,10 @@ async function follow(session: Session): Promise<void> {
   }
   claimThread(session.threadId);
   try {
-    const gbot = resolveGbot(parseOptions(session.providerOptions).gbotPath);
+    const api = resolveApi();
     await withMirrorLock(session, async () => {
       if (session.turn !== null || session.closed) return;
-      const pulled = await pullTranscript({ gbot, session, agentId });
+      const pulled = await pullTranscript({ api, session, agentId });
       if (session.turn !== null || session.closed) return;
       if (pulled.deltas.length > 0) {
         emitDeltas(session.threadId, [
@@ -487,7 +486,7 @@ async function follow(session: Session): Promise<void> {
       pulled.commit();
     });
   } catch {
-    // The next tick retries; gbot recovers hibernated and moved pods itself.
+    // The next tick retries.
   }
   followLater(session);
 }
@@ -525,9 +524,9 @@ async function runTurn(args: {
     return;
   }
 
-  let gbot: string;
+  let api: GrokApi;
   try {
-    gbot = resolveGbot(options.gbotPath);
+    api = resolveApi();
   } catch (error) {
     fail(errorMessage(error));
     return;
@@ -536,7 +535,7 @@ async function runTurn(args: {
   let agentId = resolveAgentId(session, args.model);
   if (agentId === null) {
     try {
-      const agents = await listAgents(gbot);
+      const agents = await listAgents(api);
       agentId = agents.find((agent) => agent.kind === "bot")?.id ?? null;
     } catch (error) {
       fail(errorMessage(error));
@@ -562,7 +561,7 @@ async function runTurn(args: {
     withMirrorLock(session, async () => {
       if (turn.cancelled || session.turn !== turn) return 0;
       const pulled = await pullTranscript({
-        gbot,
+        api,
         session,
         agentId,
         signal: turn.abort.signal,
@@ -596,7 +595,7 @@ async function runTurn(args: {
 
   let agent: GrokAgent;
   try {
-    agent = await getAgent(gbot, agentId, turn.abort.signal);
+    agent = await getAgent(api, agentId, turn.abort.signal);
     BOT_NAMES.set(agentId, agent.name);
     // Anything already in Grok that bb hasn't shown (the history on a new thread,
     // messages typed in the Grok Bot app) lands before this turn's own traffic.
@@ -619,9 +618,9 @@ async function runTurn(args: {
   const outgoing =
     options.identityHeader === false
       ? text
-      : `${identityHeader(agent.name, session.threadId)}\n\n${text}`;
+      : `${identityHeader(agent.name, session.threadId, api.policy.localAgentBridge)}\n\n${text}`;
   try {
-    await sendMessage(gbot, agentId, outgoing);
+    await sendMessage(api, agentId, outgoing);
   } catch (error) {
     if (!turn.cancelled) fail(errorMessage(error));
     return;
@@ -637,7 +636,7 @@ async function runTurn(args: {
     turn.timer = null;
     if (turn.cancelled || session.turn !== turn) return;
     try {
-      const status = (await getAgent(gbot, agentId, turn.abort.signal)).status;
+      const status = (await getAgent(api, agentId, turn.abort.signal)).status;
       if (turn.cancelled) return;
       const newest = status?.newestEntryId ?? null;
       if (newest !== lastNewest) {
@@ -667,7 +666,7 @@ async function runTurn(args: {
       }
     } catch (error) {
       if (turn.cancelled) return;
-      if (error instanceof GbotError && error.code === "not-installed") {
+      if (error instanceof GrokApiError && error.code !== "failed") {
         fail(error.message);
         return;
       }
@@ -758,35 +757,22 @@ function health(
   };
 }
 
-async function checkHealth(providerOptions: unknown): Promise<ProviderHealthResult> {
-  const options = parseOptions(providerOptions);
-  let gbot: string;
+async function checkHealth(_providerOptions: unknown): Promise<ProviderHealthResult> {
+  // Local checks only (token file present and private, allowlist set); no network.
+  let api: GrokApi;
   try {
-    gbot = resolveGbot(options.gbotPath);
+    api = resolveApi();
   } catch (error) {
-    return health("not_installed", errorMessage(error), null);
+    return health("unauthenticated", errorMessage(error), null);
   }
-  const version = await gbotVersion(gbot);
-  try {
-    const report = await doctor(gbot);
-    const session = report.grokBotAppSession;
-    if (session?.usable) return health("ready", null, version);
-    if (session?.present) {
-      return health(
-        "expired",
-        `Grok Bot app session is unusable: ${session.error ?? "unknown error"}`,
-        version,
-      );
-    }
-    if (report.gatewayAuthPresent) return health("ready", null, version);
+  if (api.policy.allowedBots.length === 0) {
     return health(
       "unauthenticated",
-      "Open the Grok Bot desktop app and sign in; gbot reads its session.",
-      version,
+      "No Grok Bots are allowlisted. Add bot ids to allowedBots in ~/.config/bb-grok-bot/config.json.",
+      null,
     );
-  } catch (error) {
-    return health("unknown", errorMessage(error), version);
   }
+  return health("ready", null, null);
 }
 
 function modelEntry(agent: GrokAgent, isDefault: boolean) {
@@ -852,8 +838,8 @@ const handlers: Record<string, RequestHandler> = {
       return;
     }
     try {
-      const gbot = resolveGbot(parseOptions(parsed.data.providerOptions).gbotPath);
-      const agents = await listAgents(gbot);
+      const api = resolveApi();
+      const agents = await listAgents(api);
       const firstBot = agents.findIndex((agent) => agent.kind === "bot");
       const defaultIndex = firstBot === -1 ? 0 : firstBot;
       io.sendResult(id, {

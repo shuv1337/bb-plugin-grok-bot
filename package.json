@@ -8,7 +8,7 @@
   },
   "bb": {
     "name": "Grok Bot",
-    "description": "Chat with your Grok Bot bots and groups as a BB agent provider, through grok-bot-cli (gbot).",
+    "description": "Chat with allowlisted Grok Bot bots and groups as a BB agent provider.",
     "branding": {
       "icon": "Bot"
     },
@@ -52,9 +52,10 @@
     "tailwind-merge": "^3.4.0",
     "vaul": "^1.1.2"
   },
-  "description": "Talk to your Grok Bot bots and groups from BB threads, via grok-bot-cli (gbot).",
+  "description": "Talk to allowlisted Grok Bot bots and groups from BB threads (direct HTTPS client, Linux friendly).",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
     "build": "bb plugin build",
     "test": "vitest run"
   }

@@ -24,15 +24,15 @@ export const rosterAgentSchema = z.object({
 
 export type RosterAgent = z.infer<typeof rosterAgentSchema>;
 
-const gbotInput = z.object({ gbotPath: z.string().optional() }).strict();
+const emptyInput = z.object({}).strict();
 
 export const hostContract = defineRpcContract({
   roster: {
-    input: gbotInput,
+    input: emptyInput,
     output: z.object({ agents: z.array(rosterAgentSchema) }).strict(),
   },
   avatars: {
-    input: gbotInput,
+    input: emptyInput,
     output: z
       .object({ avatars: z.record(z.string(), z.string()) })
       .strict(),
