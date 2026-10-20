@@ -1,16 +1,14 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { experimental_captureBridgeJsonRpcOutput as captureBridgeJsonRpcOutput } from "@get-bb/plugin-sdk/provider-bridge/testing";
 import type { CapturedBridgeJsonRpcOutput } from "@get-bb/plugin-sdk/provider-bridge/testing";
 
 import { handleLine } from "../src/provider-bridge.js";
+import { FAKE_BOT, FAKE_GROUP, installFakeBackend, writeConfig } from "./fake-backend.js";
+import { setFetchForTesting } from "../src/grok-api.js";
 
-const FAKE_GBOT = fileURLToPath(new URL("./fake-gbot.mjs", import.meta.url));
-const FAKE_BOT = "11111111-2222-4333-8444-555555555555";
-const FAKE_GROUP = "99999999-2222-4333-8444-555555555555";
 const FAKEY_TAG = `::grok-bot-author{agent="${FAKE_BOT}" name="Fakey"}\n\n`;
 const ROOM_TAG = `::grok-bot-author{agent="${FAKE_GROUP}" name="FakeRoom"}\n\n`;
 
@@ -28,7 +26,7 @@ function options(model: string) {
     permissionScope: "full",
     approvalReviewer: null,
     permissionEscalation: null,
-    providerOptions: { gbotPath: FAKE_GBOT, pollIntervalMs: 1_000 },
+    providerOptions: { pollIntervalMs: 1_000 },
   };
 }
 
@@ -65,6 +63,8 @@ function messages(deltas: Delta[]): string[] {
 beforeEach(() => {
   workDir = mkdtempSync(join(tmpdir(), "bb-grok-bot-turns-"));
   process.env.FAKE_GBOT_STATE = join(workDir, "state.json");
+  writeConfig(workDir, [FAKE_BOT, FAKE_GROUP]);
+  installFakeBackend(process.env.FAKE_GBOT_STATE);
   output = captureBridgeJsonRpcOutput();
   deltasByThread.clear();
   send("initialize", { protocolVersion: 2, client: { name: "test", version: "0" } });
@@ -75,6 +75,7 @@ afterEach(() => {
     send("thread/stop", { threadId, providerThreadId: "ignored", activeTurnId: null, intent: "release" });
   }
   output.restore();
+  setFetchForTesting(null);
   rmSync(workDir, { recursive: true, force: true });
 });
 
@@ -97,7 +98,7 @@ it("backfills history, then streams each turn's replies without echoing bb's own
   expect(deltas[1]?.kind).toBe("input.accepted");
   const state = JSON.parse(readFileSync(process.env.FAKE_GBOT_STATE!, "utf8"));
   expect(state.lastSent).toBe(
-    `[bb identity: you are Fakey; your BB thread is thr_a. Run bb thread commands as yourself after: eval "$(bb grok-bot env thr_a)"]\n\nhello bot`,
+    `[bb identity: you are Fakey; your BB thread is thr_a.]\n\nhello bot`,
   );
 
   send("turn/start", {
@@ -119,7 +120,7 @@ it("backfills history, then streams each turn's replies without echoing bb's own
 });
 
 it("labels group replies with the author", async () => {
-  process.env.FAKE_GBOT_GROUP_AUTHOR = "1";
+  process.env.FAKE_GROUP_AUTHOR = "1";
   send("thread/start", { threadId: "thr_g", cwd: workDir, instructionMode: "append", options: options(FAKE_GROUP) });
   send("turn/start", {
     threadId: "thr_g",
@@ -134,7 +135,7 @@ it("labels group replies with the author", async () => {
     `${FAKEY_TAG}reply to: hi room`,
     `${ROOM_TAG}📎 report.pdf (open it in Grok Bot)`,
   ]);
-  delete process.env.FAKE_GBOT_GROUP_AUTHOR;
+  delete process.env.FAKE_GROUP_AUTHOR;
 });
 
 it("interrupts a running turn", async () => {
@@ -201,6 +202,40 @@ it("mirrors Grok app activity into a bridge-opened turn", async () => {
   ]);
   send("thread/stop", { threadId: "thr_m", providerThreadId: "ignored", activeTurnId: null, intent: "release" });
 }, 20_000);
+
+it("refreshes an entry edited in place (updatedSeq) under the same bb item", async () => {
+  send("thread/start", { threadId: "thr_u", cwd: workDir, instructionMode: "append", options: options(FAKE_BOT) });
+  send("turn/start", {
+    threadId: "thr_u",
+    providerThreadId: "ignored",
+    clientRequestId: "creq_uuuuuuuuuu",
+    input: [{ type: "text", text: "[grok-bot:register] Fakey", mentions: [] }],
+    options: options(FAKE_BOT),
+  });
+  await waitForBoundary("thr_u", 1);
+  let state = JSON.parse(readFileSync(process.env.FAKE_GBOT_STATE!, "utf8"));
+  state.entries.push(
+    { id: "u1", seq: 2, kind: "send-message", timestampMs: Date.now(), message: { type: "text", content: "partial" } },
+  );
+  writeFileSync(process.env.FAKE_GBOT_STATE!, JSON.stringify(state));
+  await waitForBoundary("thr_u", 2);
+  state = JSON.parse(readFileSync(process.env.FAKE_GBOT_STATE!, "utf8"));
+  const edited = state.entries.find((e: { id: string }) => e.id === "u1");
+  edited.message.content = "final";
+  edited.updatedSeq = 4;
+  const user = state.entries.find((e: { kind: string; role?: string }) => e.kind === "message" && e.role === "user");
+  if (user) user.updatedSeq = 5;
+  else state.entries.push({ id: "u0", seq: 1, updatedSeq: 5, kind: "message", role: "user", timestampMs: 1, content: "old user" });
+  state.entries.push({ id: "u2", seq: 3, kind: "send-message", timestampMs: Date.now(), message: { type: "text", content: "next" } });
+  writeFileSync(process.env.FAKE_GBOT_STATE!, JSON.stringify(state));
+  const deltas = await waitForBoundary("thr_u", 3);
+  const lastTurn = deltas.slice(deltas.map((d) => d.kind).lastIndexOf("turn.boundary", deltas.length - 2) + 1);
+  expect(messages(lastTurn)).toEqual([`${FAKEY_TAG}final`, `${FAKEY_TAG}next`]);
+  const keys = lastTurn.filter((d) => d.kind === "item.open").map((d) => (d as { key: { providerItemId: string } }).key.providerItemId);
+  expect(keys).toEqual(["grok-bot-u1", "grok-bot-u2"]);
+  expect(lastTurn.some((d) => d.kind === "input.provider")).toBe(false);
+  send("thread/stop", { threadId: "thr_u", providerThreadId: "ignored", activeTurnId: null, intent: "release" });
+}, 30_000);
 
 it("does not forward bb system notices to the bot", async () => {
   send("thread/start", { threadId: "thr_s", cwd: workDir, instructionMode: "append", options: options(FAKE_BOT) });

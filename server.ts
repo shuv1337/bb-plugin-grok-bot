@@ -50,13 +50,6 @@ const snapshotSchema = z.object({
 });
 
 const settingsDescriptors = {
-  gbotPath: {
-    type: "string",
-    label: "gbot path",
-    description:
-      "Absolute path to the gbot executable. Leave empty to find it on PATH.",
-    default: "",
-  },
   pollIntervalSeconds: {
     type: "number",
     label: "Poll interval (seconds)",
@@ -91,11 +84,6 @@ export default function plugin(bb: BbPluginApi) {
     const hostId = (await bb.sdk.system.config()).primaryHostId;
     if (!hostId) throw new Error("This BB server has no local machine.");
     return hostId;
-  };
-
-  const gbotInput = async () => {
-    const path = (await settings.get()).gbotPath.trim();
-    return path ? { gbotPath: path } : {};
   };
 
   const existingProjectId = async (): Promise<string | null> => {
@@ -144,7 +132,7 @@ export default function plugin(bb: BbPluginApi) {
 
   const liveRoster = async (): Promise<RosterAgent[]> => {
     const hostId = await primaryHostId();
-    return (await host.call("roster", await gbotInput(), { hostId })).agents;
+    return (await host.call("roster", {}, { hostId })).agents;
   };
 
   // Falls back to the last saved roster so bot names still resolve while Grok is unreachable.
@@ -365,7 +353,7 @@ export default function plugin(bb: BbPluginApi) {
 
   // The directory survives restarts: the last good roster and avatars are kept in kv
   // and served at once, while a refresh runs behind them. The thread map lives in kv
-  // already and never depends on gbot being reachable.
+  // already and never depends on Grok Bot being reachable.
   const ROSTER_TTL_MS = 10 * 60_000;
   const AVATAR_TTL_MS = 30 * 60_000;
   let snapshot: z.infer<typeof snapshotSchema> | null = null;
@@ -391,7 +379,7 @@ export default function plugin(bb: BbPluginApi) {
         let avatars = snapshot?.avatars ?? {};
         if (withAvatars || Object.keys(avatars).length === 0) {
           const hostId = await primaryHostId();
-          avatars = (await host.call("avatars", await gbotInput(), { hostId })).avatars;
+          avatars = (await host.call("avatars", {}, { hostId })).avatars;
           avatarsAt = Date.now();
         }
         snapshot = { at: Date.now(), agents, avatars };
@@ -459,10 +447,10 @@ export default function plugin(bb: BbPluginApi) {
     icon: "Bot",
     strings: {
       signInHint:
-        "Open the Grok Bot desktop app and sign in; gbot reads its session.",
+        "Put a Grok Bot token in ~/.config/bb-grok-bot/token (mode 600) and allowlist bots in config.json.",
       expiredHint:
-        "gbot can't use the Grok Bot app session. Restart the Grok Bot app, then reload.",
-      installUrl: "https://github.com/ScriptedAlchemy/grok-bot-cli",
+        "The Grok Bot token was rejected. Replace ~/.config/bb-grok-bot/token.",
+      installUrl: "https://github.com/shuv1337/bb-plugin-grok-bot#linux-setup",
     },
     maintenance: { health: true, usage: false, installation: false },
     capabilities: {
@@ -480,12 +468,9 @@ export default function plugin(bb: BbPluginApi) {
     models: { fallback: [], scope: "host" },
     deriveProviderOptions(context): GrokBotProviderOptions {
       const values = context.settings;
-      const gbotPath =
-        typeof values.gbotPath === "string" ? values.gbotPath.trim() : "";
       const number = (value: unknown, fallback: number) =>
         typeof value === "number" && Number.isFinite(value) ? value : fallback;
       return {
-        ...(gbotPath ? { gbotPath } : {}),
         pollIntervalMs: Math.round(
           number(values.pollIntervalSeconds, DEFAULT_POLL_INTERVAL_MS / 1000) * 1000,
         ),
